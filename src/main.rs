@@ -78,9 +78,13 @@ fn read_samples(name: &str) -> Result<Vec<Sample>> {
 
 struct Weights {
 	// Our first layer has 16 nodes
-	// Each taking 4 inputs and a relu
+	// Each taking 4 inputs and a sigmoid
 	input_layer: [[f32; 4]; 16],
 	input_layer_bias: [f32; 16],
+
+	// Our middle layer takes 16 inputs
+	// and produces 16 outputs + relu
+	middle_layer: [[f32; 16]; 16],
 
 	// Our output layer has 3 nodes, each taking
 	// 16 inputs. We then apply a softmax.
@@ -94,7 +98,11 @@ struct NeuralNet {
 	// Store input
 	input: Sample,
 	input_comp: [f32; 16],
-	input_comp_relu: [f32; 16],
+	input_comp_sigmoid: [f32; 16],
+
+	// Middle layer
+	middle_layer_comp: [f32; 16],
+	middle_comp_relu: [f32; 16],
 
 	// Store output
 	output_comp: [f32; 3],
@@ -107,21 +115,25 @@ impl NeuralNet {
 		let mut weights = Weights{
 				input_layer: [[0.0; 4]; 16],
 				input_layer_bias: [0.0; 16],
+				middle_layer: [[0.0; 16]; 16],
 				output_layer: [[0.0; 16]; 3],
 				output_layer_bias: [0.0; 3],
 			};
-		let mut t_normal = TruncatedNormal::new(0.0, 0.5)?;
+		let mut t_normal = TruncatedNormal::new(0.0, 1.0)?;
 		weights.input_layer.iter_mut().flatten()
 			.chain(weights.output_layer.iter_mut().flatten())
 			.chain(weights.input_layer_bias.iter_mut())
 			.chain(weights.output_layer_bias.iter_mut())
+			.chain(weights.middle_layer.iter_mut().flatten())
 			.for_each(|w| *w = t_normal.sample());
 
 		Ok(NeuralNet{
 			weights: weights,
 			input: Sample::default(),
 			input_comp: [0.0; 16],
-			input_comp_relu: [0.0; 16],
+			input_comp_sigmoid: [0.0; 16],
+			middle_layer_comp: [0.0; 16],
+			middle_comp_relu: [0.0; 16],
 			output_comp: [0.0; 3],
 			output_comp_softmax: [0.0; 3],
 		})
@@ -147,41 +159,132 @@ impl NeuralNet {
 			}
 
 			// Store the sum in input_comp
-			self.input_comp[node_num] = sum 
-				+ self.weights.input_layer_bias[node_num];
+			sum += self.weights.input_layer_bias[node_num];
+			self.input_comp[node_num] = sum;
 
-			// Store the relu value
-			self.input_comp_relu[node_num] = relu(sum);
+			// Store the sigmoid value
+			// self.input_comp_sigmoid[node_num] = sigmoid(sum);
+			self.input_comp_sigmoid[node_num] = relu(sigmoid(sum));
 		}
+		self.compute_middle()
+	}
+
+	fn train_input(&mut self,
+		           learning_rate: f64,
+		           d_loss_d_out: &[f64; 16]) {
+
+		let mut d_loss_d_t = d_loss_d_out.clone();
+
+		// Go back through the sigmoid
+		for (i, &v) in d_loss_d_t.iter_mut()
+			.zip(self.input_comp.iter()) {
+				*i = if v > 0.0 {
+					*i * (1.0 * *i)
+				} else {
+					0.0
+				};
+		}
+
+		// Update the bias
+		for (b, &w) in self.weights.input_layer_bias.iter_mut()
+			.zip(d_loss_d_t.iter()) {
+
+			*b -= (learning_rate * w) as f32;
+		}
+
+		// Update the weights
+		for (node_num, node) in self.weights.input_layer.iter_mut()
+			.enumerate() {
+
+			for (n, w) in node.iter_mut().enumerate() {
+				*w -= learning_rate as f32
+					* d_loss_d_t[node_num] as f32
+					* match n {
+						0 => self.input.sepal_width,
+						1 => self.input.sepal_length,
+						2 => self.input.petal_width,
+						3 => self.input.petal_length,
+						_ => panic!("more than four iteration"),
+					};
+			}
+		}
+   }
+
+	fn compute_middle(&mut self) -> [f32; 3] {
+		// Iterate over our 16 nodes
+		for (node_num, node) in self.weights.middle_layer.iter().enumerate() {
+			let mut sum = 0.0;
+			for (w, v) in node.iter().zip(self.input_comp_sigmoid.iter()) {
+				sum += w * v;
+			}
+
+			// // Set this
+			self.middle_layer_comp[node_num] = sum;
+			self.middle_comp_relu[node_num] = relu(sum);
+		}
+
 		self.compute_out()
+	}
+
+	fn train_middle(&mut self,
+		            learning_rate: f64,
+		            d_loss_d_out: &[f64; 16]) {
+
+		// d_loss_d_t means going through the relu
+		let mut d_loss_d_t = d_loss_d_out.clone();
+		for (i, &v) in d_loss_d_t.iter_mut()
+			.zip(self.middle_layer_comp.iter()) {
+			*i = if v > 0.0 {
+				*i
+			} else {
+				0.0
+			};
+		}
+
+		// Update the weights
+		for (node_num, node) in self.weights.middle_layer.iter_mut()
+			.enumerate() {
+
+			for (n, w) in node.iter_mut().enumerate() {
+				*w -= learning_rate as f32
+						* d_loss_d_t[node_num] as f32
+						* self.input_comp_sigmoid[n];
+			}
+		}
+
+		// Compute d_loss_d_i
+		let mut d_loss_d_i = [0.0 as f64; 16];
+		for (ind, i) in d_loss_d_i.iter_mut().enumerate() {
+			for n in 0..16 {
+				*i += (self.weights.middle_layer[n][ind] as f64)
+					 * d_loss_d_t[n];
+			}
+			*i *= self.input_comp_sigmoid[ind] as f64;
+		}
+
+		self.train_input(learning_rate, &d_loss_d_i)
 	}
 
 	fn compute_out(&mut self) -> [f32; 3] {
 		// Iterate over our three output nodes
 		for (node_num, node) in self.weights.output_layer.iter().enumerate() {
 			let mut sum = 0.0;
-			for (w, v) in node.iter().zip(self.input_comp_relu.iter()) {
+			for (w, v) in node.iter().zip(self.middle_comp_relu.iter()) {
 				sum += w * v;
 			}
 
 			// Set this
-			self.output_comp[node_num] = sum
-				+ self.weights.output_layer_bias[node_num];
+			sum += self.weights.output_layer_bias[node_num];
+			self.output_comp[node_num] = sum;
 		}
 
 		self.output_comp_softmax = softmax(self.output_comp);
 		self.output_comp_softmax
 	}
 
-	fn train(&mut self, learning_rate: f64) {
-		let ind = match self.input.species {
-			Species::Setosa => 0,
-			Species::Versicolor => 1,
-			Species::Virginica => 2,
-			_ => panic!("unknown type not allowed"),
-		};
-
-		let d_loss_d_out = -1.0 / self.output_comp_softmax[ind];
+	fn train_out(&mut self, learning_rate: f64,
+		                    ind: usize,
+		                    d_loss_d_out: f32) {
 		let mut d_loss_d_t = [d_loss_d_out as f64; 3];
 		let sum_exp = [
 			(self.output_comp[0] as f64).exp(),
@@ -190,6 +293,7 @@ impl NeuralNet {
 		].iter().sum::<f64>();
 		let class_exp = (self.output_comp[ind] as f64).exp();
 
+		// Compute d_loss_d_t
 		for (num, w) in d_loss_d_t.iter_mut().enumerate() {
 			if num == ind {
 				*w *= (class_exp * (sum_exp - class_exp)) 
@@ -218,7 +322,7 @@ impl NeuralNet {
 			// We need to consider each of the 16 weights
 
 			for (w, &v) in node.iter_mut()
-				.zip(self.input_comp_relu.iter()) {
+				.zip(self.middle_comp_relu.iter()) {
 
 				*w -= (t * v as f64 * learning_rate) as f32;
 			}
@@ -232,42 +336,22 @@ impl NeuralNet {
 				self.weights.output_layer[1][ind] as f64 * d_loss_d_t[1],
 				self.weights.output_layer[2][ind] as f64 * d_loss_d_t[2],
 			].iter().sum::<f64>()
-			* self.input_comp_relu[ind] as f64;
+			* self.middle_comp_relu[ind] as f64;
 		}
 
-		// d_loss_d_t means going through the relu
-		let mut d_loss_d_t = d_loss_d_i.clone();
-		for (i, &v) in d_loss_d_t.iter_mut().zip(self.input_comp.iter()) {
-			*i = if v > 0.0 {
-				*i
-			} else {
-				0.0
-			};
-		}
+		self.train_middle(learning_rate, &d_loss_d_i)
+	}
 
-		// Update the bias
-		for (b, &w) in self.weights.input_layer_bias.iter_mut()
-			.zip(d_loss_d_t.iter()) {
+	fn train(&mut self, learning_rate: f64) {
+		let ind = match self.input.species {
+			Species::Setosa => 0,
+			Species::Versicolor => 1,
+			Species::Virginica => 2,
+			_ => panic!("unknown type not allowed"),
+		};
+		let d_loss_d_out = -1.0 / self.output_comp_softmax[ind];
 
-			*b -= (learning_rate * w) as f32;
-		}
-
-		// Update the weights - each node has four weights
-		for (node_num, node) in self.weights.input_layer.iter_mut()
-			.enumerate() {
-
-			for (n, w) in node.iter_mut().enumerate() {
-				*w -= learning_rate as f32
-					* d_loss_d_t[node_num] as f32
-					* match n {
-						0 => self.input.sepal_width,
-						1 => self.input.sepal_length,
-						2 => self.input.petal_width,
-						3 => self.input.petal_length,
-						_ => panic!("more than four iteration"),
-					};
-			}
-		}
+		self.train_out(learning_rate, ind, d_loss_d_out)
 	}
 }
 
@@ -276,13 +360,13 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 	let mut rng = rand::thread_rng();
 
 	// Read / Create NN
-	for _ in 0..2000 {
+	for _ in 0..25000 {
 		samples.shuffle(&mut rng);
 
 		for &s in samples.iter() {
 			// Train with learning_rate = 0.001
 			nn.compute(s);
-			nn.train(0.001);
+			nn.train(0.00025);
 		}
 	}
 
@@ -375,4 +459,8 @@ fn softmax(vals: [f32; 3]) -> [f32; 3] {
 
 fn relu(val: f32) -> f32 {
 	if val > 0.0 {val} else {0.0}
+}
+
+fn sigmoid(val: f32) -> f32 {
+	1.0 / (1.0 + ((-1.0 * val).exp()))
 }
