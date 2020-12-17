@@ -40,6 +40,7 @@ impl Default for Species {
 
 #[derive(Default, Copy, Clone, Debug)]
 struct Sample {
+	id: u8,
 	sepal_length: f64,
 	sepal_width: f64,
 	petal_length: f64,
@@ -65,7 +66,7 @@ fn read_samples(name: &str) -> Result<Vec<Sample>> {
 		let mut s = Sample::default();
 		for (n, f) in l.split(",").enumerate() {
 			match n {
-				0 => {},
+				0 => s.id = f.parse::<u8>()?,
 				1 => s.sepal_length = f.parse::<f64>()? / NORM_CONST,
 				2 => s.sepal_width = f.parse::<f64>()? / NORM_CONST,
 				3 => s.petal_length = f.parse::<f64>()? / NORM_CONST,
@@ -318,15 +319,20 @@ impl NeuralNet {
 
 fn train(nn: &mut NeuralNet) -> Result<()> {
 	let mut samples = read_samples(FILENAME)?;
+	let tests = read_samples(TEST_DATA)?;
 	let mut rng = rand::thread_rng();
 
 	// Read / Create NN
  	for j in 0.. {
 		if j % 10_000 == 0 {
 			println!("done {}", j);
-			let total_loss = test(nn)?;
+			let total_loss = test(nn, &tests)?;
 			if total_loss < 0.01 {
+
 				println!("net trained - breaking\n");
+				// Print tests against our training data
+				test(nn, &samples)?;
+
 				// Dump the final weights
 				println!("Weights=======");
 				println!("==============");
@@ -357,12 +363,11 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 	Ok(())
 }
 
-fn test(nn: &mut NeuralNet) -> Result<f64> {
-	let samples = read_samples(TEST_DATA)?;
-
+fn test(nn: &mut NeuralNet, samples: &[Sample]) -> Result<f64> {
 	let mut total_loss = 0.0;
 
 	for &s in samples.iter() {
+		print!("[{}]\t", s.id);
 		print!("species = {:?}\t", s.species);
 		let ans = nn.compute([s.sepal_length,
 		   		              s.sepal_width,
