@@ -1,11 +1,13 @@
 // Iris dataset NN
 use rand::prelude::SliceRandom;
 use rand::distributions::Distribution;
-use statrs::distribution::Normal;
+use statrs::distribution::{Normal, Uniform};
 
-const FILENAME: &'static str = "Iris.csv";
+const FILENAME: &'static str = "iris.csv";
 const TEST_DATA: &'static str = "iris_test.csv";
-const NORM_CONST: f32 = 10.0;
+const NORM_CONST: f64 = 10.0;
+
+const NUM_NODES: usize = 12;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -36,10 +38,10 @@ impl Default for Species {
 
 #[derive(Default, Copy, Clone, Debug)]
 struct Sample {
-	sepal_length: f32,
-	sepal_width: f32,
-	petal_length: f32,
-	petal_width: f32,
+	sepal_length: f64,
+	sepal_width: f64,
+	petal_length: f64,
+	petal_width: f64,
 	species: Species,
 }
 
@@ -62,10 +64,10 @@ fn read_samples(name: &str) -> Result<Vec<Sample>> {
 		for (n, f) in l.split(",").enumerate() {
 			match n {
 				0 => {},
-				1 => s.sepal_length = f.parse::<f32>()? / NORM_CONST,
-				2 => s.sepal_width = f.parse::<f32>()? / NORM_CONST,
-				3 => s.petal_length = f.parse::<f32>()? / NORM_CONST,
-				4 => s.petal_width = f.parse::<f32>()? / NORM_CONST,
+				1 => s.sepal_length = f.parse::<f64>()? / NORM_CONST,
+				2 => s.sepal_width = f.parse::<f64>()? / NORM_CONST,
+				3 => s.petal_length = f.parse::<f64>()? / NORM_CONST,
+				4 => s.petal_width = f.parse::<f64>()? / NORM_CONST,
 				5 => s.species = Species::from_string(f)?,
 				_ => panic!("bad csv data")
 			}
@@ -76,151 +78,126 @@ fn read_samples(name: &str) -> Result<Vec<Sample>> {
 	Ok(samples)
 }
 
+#[derive(Debug)]
 struct Weights {
-	// Our first layer has 16 nodes
-	// Each taking 4 inputs and a sigmoid
-	input_layer: [[f32; 4]; 16],
-	input_layer_bias: [f32; 16],
+	input_layer: [[f64; 4]; NUM_NODES],
 
-	// Our middle layer takes 16 inputs
-	// and produces 16 outputs + relu
-	middle_layer: [[f32; 16]; 16],
+	// Our middle layer. This is dense from the layer before.
+	// We apply a leaky relu afterwards.
+	middle_layer: [[f64; NUM_NODES]; NUM_NODES],
 
-	// Our output layer has 3 nodes, each taking
-	// 16 inputs. We then apply a softmax.
-	output_layer: [[f32; 16]; 3],
-	output_layer_bias: [f32; 3],
+	// Our output layer
+	output_layer: [[f64; NUM_NODES]; 3],
 }
 
 struct NeuralNet {
-	weights: Weights,
+	weights: Box<Weights>,
 
-	// Store input
-	input: Sample,
-	input_comp: [f32; 16],
-	input_comp_sigmoid: [f32; 16],
+	// Our buffers
+	input: [f64; 4],
+	input_comp: Box<[f64; NUM_NODES]>,
+	input_comp_relu: Box<[f64; NUM_NODES]>,
+	middle_comp: Box<[f64; NUM_NODES]>,
+	middle_comp_relu: Box<[f64; NUM_NODES]>,
+	output_comp: [f64; 3],
+	output_comp_softmax: [f64; 3],
 
-	// Middle layer
-	middle_layer_comp: [f32; 16],
-	middle_comp_relu: [f32; 16],
-
-	// Store output
-	output_comp: [f32; 3],
-	output_comp_softmax: [f32; 3],
+	train_input: bool,
+	train_middle: bool,
 }
 
 impl NeuralNet {
 	fn new() -> Result<Self> {
+		let mut weights = Box::new(
+			Weights{
+				input_layer: [[0.0; 4]; NUM_NODES],
+				middle_layer: [[0.0; NUM_NODES]; NUM_NODES],
+				output_layer: [[0.0; NUM_NODES]; 3],
+			}
+		);
+		let mut r = rand::thread_rng();
+		let t_uniform = Uniform::new(-1.0, 1.0)?;
+		let mut t_normal = TruncatedNormal::new(0.0, 0.5)?;
 
-		let mut weights = Weights{
-				input_layer: [[0.0; 4]; 16],
-				input_layer_bias: [0.0; 16],
-				middle_layer: [[0.0; 16]; 16],
-				output_layer: [[0.0; 16]; 3],
-				output_layer_bias: [0.0; 3],
-			};
-		let mut t_normal = TruncatedNormal::new(0.0, 1.0)?;
-		weights.input_layer.iter_mut().flatten()
-			.chain(weights.output_layer.iter_mut().flatten())
-			.chain(weights.input_layer_bias.iter_mut())
-			.chain(weights.output_layer_bias.iter_mut())
-			.chain(weights.middle_layer.iter_mut().flatten())
+		weights.output_layer.iter_mut().flatten()
 			.for_each(|w| *w = t_normal.sample());
 
-		Ok(NeuralNet{
+		weights.middle_layer.iter_mut().flatten()
+			.chain(weights.input_layer.iter_mut().flatten())
+			.for_each(|w| *w = t_uniform.sample(&mut r));
+
+		Ok(Self{
 			weights: weights,
-			input: Sample::default(),
-			input_comp: [0.0; 16],
-			input_comp_sigmoid: [0.0; 16],
-			middle_layer_comp: [0.0; 16],
-			middle_comp_relu: [0.0; 16],
+			input: [0.0; 4],
+			input_comp: Box::new([0.0; NUM_NODES]),
+			input_comp_relu: Box::new([0.0; NUM_NODES]),
+			middle_comp: Box::new([0.0; NUM_NODES]),
+			middle_comp_relu: Box::new([0.0; NUM_NODES]),
 			output_comp: [0.0; 3],
 			output_comp_softmax: [0.0; 3],
+
+			train_input: false,
+			train_middle: false,
 		})
 	}
 
-	fn compute(&mut self, sample: Sample) -> [f32; 3] {
-		// Save the sample
-		self.input = sample;
+	fn compute(&mut self, input: [f64; 4]) -> [f64; 3] {
+		self.input = input;
 
-		// For each of the 16 nodes
-		for (node_num, node) in self.weights.input_layer.iter().enumerate() {
-			// Each node is [f32; 4]
-			// Perform a weighted sum
-			let mut sum = 0.0;
-			for (n, w) in node.iter().enumerate() {
-				sum += match n {
-					0 => w * sample.sepal_length,
-					1 => w * sample.sepal_width,
-					2 => w * sample.petal_length,
-					3 => w * sample.petal_width,
-					_ => panic!("too many weights")
-				};
-			}
+		for ((node, o), s) in self.weights.input_layer.iter()
+			.zip(self.input_comp.iter_mut())
+			.zip(self.input_comp_relu.iter_mut()) {
 
-			// Store the sum in input_comp
-			sum += self.weights.input_layer_bias[node_num];
-			self.input_comp[node_num] = sum;
+			*o = node.iter()
+				.zip(input.iter())
+				.map(|(&w, &i)| w * i)
+				.sum::<f64>();
 
-			// Store the sigmoid value
-			// self.input_comp_sigmoid[node_num] = sigmoid(sum);
-			self.input_comp_sigmoid[node_num] = relu(sigmoid(sum));
+			// Apply the ReLU
+			*s = sigmoid(*o);
 		}
+
 		self.compute_middle()
 	}
 
 	fn train_input(&mut self,
 		           learning_rate: f64,
-		           d_loss_d_out: &[f64; 16]) {
+		           d_l_d_out: &[f64; NUM_NODES]) {
 
-		let mut d_loss_d_t = d_loss_d_out.clone();
-
-		// Go back through the sigmoid
-		for (i, &v) in d_loss_d_t.iter_mut()
-			.zip(self.input_comp.iter()) {
-				*i = if v > 0.0 {
-					*i * (1.0 * *i)
-				} else {
-					0.0
-				};
-		}
-
-		// Update the bias
-		for (b, &w) in self.weights.input_layer_bias.iter_mut()
-			.zip(d_loss_d_t.iter()) {
-
-			*b -= (learning_rate * w) as f32;
-		}
+		// Step back through the sigmoid
+		let d_l_d_t = d_l_d_out.iter()
+			.zip(self.input_comp.iter().map(|&i| sigmoid(i)))
+			.map(|(&t, i)| t * i * (1.0 - i))
+			.collect::<Vec<f64>>();
 
 		// Update the weights
-		for (node_num, node) in self.weights.input_layer.iter_mut()
-			.enumerate() {
+		for (node, &t) in self.weights.input_layer.iter_mut()
+			.zip(d_l_d_t.iter()) {
 
-			for (n, w) in node.iter_mut().enumerate() {
-				*w -= learning_rate as f32
-					* d_loss_d_t[node_num] as f32
-					* match n {
-						0 => self.input.sepal_width,
-						1 => self.input.sepal_length,
-						2 => self.input.petal_width,
-						3 => self.input.petal_length,
-						_ => panic!("more than four iteration"),
-					};
+			for (w, &i) in node.iter_mut()
+				.zip(self.input.iter()) {
+
+				*w -= learning_rate * t * i;
 			}
 		}
-   }
+	}
 
-	fn compute_middle(&mut self) -> [f32; 3] {
-		// Iterate over our 16 nodes
-		for (node_num, node) in self.weights.middle_layer.iter().enumerate() {
-			let mut sum = 0.0;
-			for (w, v) in node.iter().zip(self.input_comp_sigmoid.iter()) {
-				sum += w * v;
-			}
+	fn compute_middle(&mut self) -> [f64; 3] {
+		for ((node, v), r) in self.weights.middle_layer.iter()
+			.zip(self.middle_comp.iter_mut())
+			.zip(self.middle_comp_relu.iter_mut()) {
 
-			// // Set this
-			self.middle_layer_comp[node_num] = sum;
-			self.middle_comp_relu[node_num] = relu(sum);
+			*v = node.iter()
+				.zip(self.input_comp_relu.iter())
+				.map(|(&weight, &input)| weight * input)
+				.sum::<f64>();
+
+			// Apply the relu
+			*r = if *v > 0.0 {
+				*v
+			} else {
+				0.01 * *v
+			};
 		}
 
 		self.compute_out()
@@ -228,130 +205,124 @@ impl NeuralNet {
 
 	fn train_middle(&mut self,
 		            learning_rate: f64,
-		            d_loss_d_out: &[f64; 16]) {
+		            d_l_d_out: Box<[f64; NUM_NODES]>) {
 
-		// d_loss_d_t means going through the relu
-		let mut d_loss_d_t = d_loss_d_out.clone();
-		for (i, &v) in d_loss_d_t.iter_mut()
-			.zip(self.middle_layer_comp.iter()) {
-			*i = if v > 0.0 {
-				*i
-			} else {
-				0.0
-			};
+		// Step back through leaky relu
+		let mut d_l_d_t = d_l_d_out.clone();
+		for (i, &v) in d_l_d_t.iter_mut()
+			.zip(self.middle_comp.iter()) {
+			if v <= 0.0 {
+				*i *= 0.01;
+			}
 		}
 
 		// Update the weights
-		for (node_num, node) in self.weights.middle_layer.iter_mut()
-			.enumerate() {
+		for (node, &t) in self.weights.middle_layer.iter_mut()
+			.zip(d_l_d_t.iter()) {
 
-			for (n, w) in node.iter_mut().enumerate() {
-				*w -= learning_rate as f32
-						* d_loss_d_t[node_num] as f32
-						* self.input_comp_sigmoid[n];
+			// We need to evaluate each node at the input
+			// given from the previous layer
+			for (w, &i) in node.iter_mut()
+				.zip(self.input_comp_relu.iter()) {
+
+				*w -= learning_rate * t * i;
 			}
 		}
 
-		// Compute d_loss_d_i
-		let mut d_loss_d_i = [0.0 as f64; 16];
-		for (ind, i) in d_loss_d_i.iter_mut().enumerate() {
-			for n in 0..16 {
-				*i += (self.weights.middle_layer[n][ind] as f64)
-					 * d_loss_d_t[n];
-			}
-			*i *= self.input_comp_sigmoid[ind] as f64;
+
+		if !self.train_input {
+			return;
 		}
 
-		self.train_input(learning_rate, &d_loss_d_i)
+		// Compute d_l_d_i
+		let mut d_l_d_i = Box::new([0.0 as f64; NUM_NODES]);
+		for ((n, v), &i) in d_l_d_i.iter_mut().enumerate()
+			.zip(self.input_comp_relu.iter()) {
+
+			*v = self.weights.middle_layer.iter()
+				.zip(d_l_d_t.iter())
+				.map(|(&w, &t)| w[n] * t)
+				.sum::<f64>()
+				* i;
+		}
+		// TODO
+		self.train_input(learning_rate * 1000.0, &d_l_d_i);
 	}
 
-	fn compute_out(&mut self) -> [f32; 3] {
-		// Iterate over our three output nodes
-		for (node_num, node) in self.weights.output_layer.iter().enumerate() {
-			let mut sum = 0.0;
-			for (w, v) in node.iter().zip(self.middle_comp_relu.iter()) {
-				sum += w * v;
-			}
+	fn compute_out(&mut self) -> [f64; 3] {
+		for (node, out) in self.weights.output_layer.iter()
+			.zip(self.output_comp.iter_mut()) {
 
-			// Set this
-			sum += self.weights.output_layer_bias[node_num];
-			self.output_comp[node_num] = sum;
+			*out = node.iter()
+				.zip(self.middle_comp_relu.iter())
+				.map(|(&weight, &input)| weight * input)
+				.sum::<f64>();
 		}
 
+		// Compute softmax
 		self.output_comp_softmax = softmax(self.output_comp);
 		self.output_comp_softmax
 	}
 
-	fn train_out(&mut self, learning_rate: f64,
-		                    ind: usize,
-		                    d_loss_d_out: f32) {
-		let mut d_loss_d_t = [d_loss_d_out as f64; 3];
-		let sum_exp = [
-			(self.output_comp[0] as f64).exp(),
-			(self.output_comp[1] as f64).exp(),
-			(self.output_comp[2] as f64).exp(),
-		].iter().sum::<f64>();
-		let class_exp = (self.output_comp[ind] as f64).exp();
+	fn train_out(&mut self,
+		         learning_rate: f64,
+		         d_loss_d_out: f64,
+		         ans: usize) {
 
-		// Compute d_loss_d_t
-		for (num, w) in d_loss_d_t.iter_mut().enumerate() {
-			if num == ind {
-				*w *= (class_exp * (sum_exp - class_exp)) 
-					/ (sum_exp.powf(2.0));
+		// Step back through the softmax
+		let mut d_l_d_t = [d_loss_d_out; 3];
+		let sum_exp = self.output_comp.iter()
+			.map(|v| v.exp())
+			.sum::<f64>();
+		let sum_exp_2 = sum_exp.powi(2);
+		let class_exp = self.output_comp[ans].exp();
+
+		for (n, t) in d_l_d_t.iter_mut().enumerate() {
+			if n == ans {
+				*t *= (class_exp * (sum_exp - class_exp))
+					/ sum_exp_2;
 			} else {
-				let exp = (self.output_comp[num] as f64).exp();
-				*w *= (-1.0 * exp * class_exp) / (sum_exp.powf(2.0));
+				let exp = self.output_comp[n].exp();
+				*t *= (-1.0 * exp * class_exp) / sum_exp_2;
 			}
 		}
 
-		// From d_loss_d_t we need to compute
-		//   - d_loss_d_b
-		//   - d_loss_d_w
-		//   - d_loss_d_i
+		// Update the weights
+		for (node, &t) in self.weights.output_layer.iter_mut()
+			.zip(d_l_d_t.iter()) {
 
-		// d_t_d_b is 1 in all cases
-		for (&w, b) in d_loss_d_t.iter()
-			.zip(self.weights.output_layer_bias.iter_mut()) {
-
-			*b -= (w * learning_rate) as f32;
-		}
-
-		// d_loss_d_w considers 16 weights for each node
-		for (&t, node) in d_loss_d_t.iter()
-			.zip(self.weights.output_layer.iter_mut()) {
-			// We need to consider each of the 16 weights
-
-			for (w, &v) in node.iter_mut()
+			for (w, &i) in node.iter_mut()
 				.zip(self.middle_comp_relu.iter()) {
 
-				*w -= (t * v as f64 * learning_rate) as f32;
+				*w -= learning_rate * t * i;
 			}
 		}
 
-		// d_loss_d_i
-		let mut d_loss_d_i = [0.0 as f64; 16];
-		for (ind, i) in d_loss_d_i.iter_mut().enumerate() {
-			*i = [
-				self.weights.output_layer[0][ind] as f64 * d_loss_d_t[0],
-				self.weights.output_layer[1][ind] as f64 * d_loss_d_t[1],
-				self.weights.output_layer[2][ind] as f64 * d_loss_d_t[2],
-			].iter().sum::<f64>()
-			* self.middle_comp_relu[ind] as f64;
+		if !self.train_middle {
+			return;
 		}
 
-		self.train_middle(learning_rate, &d_loss_d_i)
+		// Compute d_l_d_i
+		let mut d_l_d_i = Box::new([0.0 as f64; NUM_NODES]);
+		for ((ind, i), &v) in d_l_d_i.iter_mut().enumerate()
+			.zip(self.middle_comp_relu.iter()) {
+
+			*i = self.weights.output_layer.iter()
+				.zip(d_l_d_t.iter())
+				.map(|(node, &t)| node[ind] * t)
+				.sum::<f64>()
+				* v;
+		}
+
+		self.train_middle(learning_rate * 0.001, d_l_d_i);
 	}
 
-	fn train(&mut self, learning_rate: f64) {
-		let ind = match self.input.species {
-			Species::Setosa => 0,
-			Species::Versicolor => 1,
-			Species::Virginica => 2,
-			_ => panic!("unknown type not allowed"),
-		};
-		let d_loss_d_out = -1.0 / self.output_comp_softmax[ind];
+	fn train(&mut self,
+		     learning_rate: f64,
+		     ans: usize) {
 
-		self.train_out(learning_rate, ind, d_loss_d_out)
+		let d_loss_d_out = -1.0 / self.output_comp_softmax[ans];
+		self.train_out(learning_rate, d_loss_d_out, ans)
 	}
 }
 
@@ -360,29 +331,59 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 	let mut rng = rand::thread_rng();
 
 	// Read / Create NN
-	for _ in 0..25000 {
-		samples.shuffle(&mut rng);
+	let learning_rate = 0.01;
+ 	nn.train_middle = true;
+ 	nn.train_input = true;
 
+ 	for j in 0.. {
+		if j % 1000 == 0 {
+			println!("done {}", j);
+			let total_loss = test(nn)?;
+			if total_loss < 0.01 {
+				println!("net trained - breaking\n");
+				// Dump the final weights
+				println!("Weights=======");
+				println!("==============");
+				println!("{:?}", nn.weights);
+				break;
+			}
+		}
+
+		samples.shuffle(&mut rng);
 		for &s in samples.iter() {
-			// Train with learning_rate = 0.001
-			nn.compute(s);
-			nn.train(0.00025);
+			let ans = nn.compute([s.sepal_length,
+				        s.sepal_width,
+				        s.petal_width,
+				        s.petal_length]);
+			if ans[0].is_nan() || ans[1].is_nan() || ans[2].is_nan() {
+				break;
+			}
+
+			nn.train(learning_rate, match s.species{
+				Species::Setosa => 0,
+				Species::Versicolor => 1,
+				Species:: Virginica => 2,
+				_ => panic!("unknown species"),
+			});
 		}
 	}
 
 	Ok(())
 }
 
-fn test(nn: &mut NeuralNet) -> Result<()> {
+fn test(nn: &mut NeuralNet) -> Result<f64> {
 	let samples = read_samples(TEST_DATA)?;
 
-	// Read / Create NN
 	let mut total_loss = 0.0;
 
 	for &s in samples.iter() {
 		print!("species = {:?}\t", s.species);
-		let ans = nn.compute(s);
-		print!("[{:.2}, {:.2}, {:.2}]\t", ans[0], ans[1], ans[2]);
+		let ans = nn.compute([s.sepal_length,
+		   		              s.sepal_width,
+				              s.petal_width,
+					          s.petal_length]);
+
+		print!("[{:.4}, {:.4}, {:.4}]\t", ans[0], ans[1], ans[2]);
 		let loss = -1.0 * match s.species {
 			Species::Setosa => ans[0].ln(),
 			Species::Versicolor => ans[1].ln(),
@@ -390,37 +391,19 @@ fn test(nn: &mut NeuralNet) -> Result<()> {
 			_ => panic!("unknown species"),
 
 		};
-		println!("loss = {}", loss);
+		println!("loss = {:.4}", loss);
 		total_loss += loss;
 	}
-	println!("\ntotal loss = {}", total_loss);
+	println!("\ntotal loss = {:.4}", total_loss);
 
-	Ok(())
-}
-
-fn run() -> Result<()> {
-
-	let mut nn = NeuralNet::new()?;
-	train(&mut nn)?;
-	println!();
-	println!("tests");
-
-	test(&mut nn)
-}
-
-
-fn main() {
-	if let Err(e) = run() {
-		eprintln!("{}", e.to_string());
-	}
-
+	Ok(total_loss)
 }
 
 struct TruncatedNormal {
 	norm: statrs::distribution::Normal,
 	rng: rand::rngs::ThreadRng,
-	min: f32,
-	max: f32,
+	min: f64,
+	max: f64,
 }
 
 impl TruncatedNormal {
@@ -430,14 +413,14 @@ impl TruncatedNormal {
 		Ok(TruncatedNormal{
 			norm: n,
 			rng: r,
-			min: (mean - 2.0 * sd) as f32,
-			max: (mean + 2.0 * sd) as f32,
+			min: mean - 2.0 * sd,
+			max: mean + 2.0 * sd,
 		})
 	}
 
-	fn sample(&mut self) -> f32 {
+	fn sample(&mut self) -> f64 {
 		loop {
-			let s = self.norm.sample(&mut self.rng) as f32;
+			let s = self.norm.sample(&mut self.rng) as f64;
 			if s < self.max && s > self.min {
 				return s;
 			}
@@ -445,22 +428,30 @@ impl TruncatedNormal {
 	}
 }
 
-fn softmax(vals: [f32; 3]) -> [f32; 3] {
-	let mut exps = [(vals[0] as f64).exp(),
-		        	(vals[1] as f64).exp(),
-			    	(vals[2] as f64).exp()];
+fn softmax(vals: [f64; 3]) -> [f64; 3] {
+	let mut exps = [vals[0].exp(),
+		        	vals[1].exp(),
+			    	vals[2].exp()];
 	let sum = exps.iter().sum::<f64>();
 	exps[0] /= sum;
 	exps[1] /= sum;
 	exps[2] /= sum;
 
-	[exps[0] as f32, exps[1] as f32, exps[2] as f32]
+	[exps[0], exps[1], exps[2]]
 }
 
-fn relu(val: f32) -> f32 {
-	if val > 0.0 {val} else {0.0}
-}
-
-fn sigmoid(val: f32) -> f32 {
+fn sigmoid(val: f64) -> f64 {
 	1.0 / (1.0 + ((-1.0 * val).exp()))
+}
+
+fn run() -> Result<()> {
+	let mut nn = NeuralNet::new()?;
+	train(&mut nn)
+}
+
+
+fn main() {
+	if let Err(e) = run() {
+		eprintln!("{}", e.to_string());
+	}
 }
