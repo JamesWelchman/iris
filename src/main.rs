@@ -8,6 +8,8 @@ const TEST_DATA: &'static str = "iris_test.csv";
 const NORM_CONST: f64 = 10.0;
 
 const NUM_NODES: usize = 12;
+const MIDDLE_LAYER_TRAIN_RATIO: f64 = 10000.0;
+const LEARNING_RATE: f64 = 0.01;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -101,9 +103,6 @@ struct NeuralNet {
 	middle_comp_relu: Box<[f64; NUM_NODES]>,
 	output_comp: [f64; 3],
 	output_comp_softmax: [f64; 3],
-
-	train_input: bool,
-	train_middle: bool,
 }
 
 impl NeuralNet {
@@ -135,9 +134,6 @@ impl NeuralNet {
 			middle_comp_relu: Box::new([0.0; NUM_NODES]),
 			output_comp: [0.0; 3],
 			output_comp_softmax: [0.0; 3],
-
-			train_input: false,
-			train_middle: false,
 		})
 	}
 
@@ -230,10 +226,6 @@ impl NeuralNet {
 		}
 
 
-		if !self.train_input {
-			return;
-		}
-
 		// Compute d_l_d_i
 		let mut d_l_d_i = Box::new([0.0 as f64; NUM_NODES]);
 		for ((n, v), &i) in d_l_d_i.iter_mut().enumerate()
@@ -246,7 +238,8 @@ impl NeuralNet {
 				* i;
 		}
 		// TODO
-		self.train_input(learning_rate * 1000.0, &d_l_d_i);
+		self.train_input(learning_rate * MIDDLE_LAYER_TRAIN_RATIO,
+			             &d_l_d_i);
 	}
 
 	fn compute_out(&mut self) -> [f64; 3] {
@@ -298,10 +291,6 @@ impl NeuralNet {
 			}
 		}
 
-		if !self.train_middle {
-			return;
-		}
-
 		// Compute d_l_d_i
 		let mut d_l_d_i = Box::new([0.0 as f64; NUM_NODES]);
 		for ((ind, i), &v) in d_l_d_i.iter_mut().enumerate()
@@ -314,7 +303,8 @@ impl NeuralNet {
 				* v;
 		}
 
-		self.train_middle(learning_rate * 0.001, d_l_d_i);
+		self.train_middle(learning_rate / MIDDLE_LAYER_TRAIN_RATIO,
+			              d_l_d_i);
 	}
 
 	fn train(&mut self,
@@ -331,10 +321,6 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 	let mut rng = rand::thread_rng();
 
 	// Read / Create NN
-	let learning_rate = 0.01;
- 	nn.train_middle = true;
- 	nn.train_input = true;
-
  	for j in 0.. {
 		if j % 1000 == 0 {
 			println!("done {}", j);
@@ -359,7 +345,7 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 				break;
 			}
 
-			nn.train(learning_rate, match s.species{
+			nn.train(LEARNING_RATE, match s.species{
 				Species::Setosa => 0,
 				Species::Versicolor => 1,
 				Species:: Virginica => 2,
