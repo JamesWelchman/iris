@@ -8,7 +8,7 @@ const TEST_DATA: &'static str = "iris_test.csv";
 const NORM_CONST: f64 = 10.0;
 
 const NUM_NODES: usize = 12;
-const MIDDLE_LAYER_TRAIN_RATIO: f64 = 10000.0;
+const MIDDLE_LAYER_TRAIN_RATIO: f64 = 1000.0;
 const LEARNING_RATE: f64 = 0.01;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -238,7 +238,7 @@ impl NeuralNet {
 				* i;
 		}
 		// TODO
-		self.train_input(learning_rate * MIDDLE_LAYER_TRAIN_RATIO,
+		self.train_input(learning_rate * MIDDLE_LAYER_TRAIN_RATIO * 0.1,
 			             &d_l_d_i);
 	}
 
@@ -322,7 +322,7 @@ fn train(nn: &mut NeuralNet) -> Result<()> {
 
 	// Read / Create NN
  	for j in 0.. {
-		if j % 1000 == 0 {
+		if j % 10_000 == 0 {
 			println!("done {}", j);
 			let total_loss = test(nn)?;
 			if total_loss < 0.01 {
