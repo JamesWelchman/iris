@@ -7,7 +7,7 @@ const FILENAME: &'static str = "iris.csv";
 const TEST_DATA: &'static str = "iris_test.csv";
 const NORM_CONST: f64 = 10.0;
 
-const NUM_NODES: usize = 12;
+const NUM_NODES: usize = 8;
 const MIDDLE_LAYER_TRAIN_RATIO: f64 = 1000.0;
 const LEARNING_RATE: f64 = 0.01;
 
